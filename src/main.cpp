@@ -7,8 +7,8 @@
 
 // ==================== OBJEK LCD ====================
 LiquidCrystal_I2C lcd(0x27, 16, 2); // Alamat 0x27, 16 kolom x 2 baris
-#define SCL_PIN 22
-#define SDA_PIN 21
+#define SCL_PIN 9
+#define SDA_PIN 8
 
 // ==================== CONFIG TREND BAROMETER ====================
 const int   TREND_SLOTS        = 18;              // 3 jam @ setiap 10 menit
@@ -143,18 +143,18 @@ WeatherPrediction predictWeatherTropis(float pressure, float humidity, float tem
   }
    
   // 5) Modifikasi dengan intensitas cahaya (LDR)
-  // ADC ESP32: 0 (gelap) - 4095 (terang)
+  // ADC ESP32: 0 (terang) - 4095 (gelap)
   if (ldrADC > 3000) {
-    // Sangat terang -> langit cerah
-    scoreCerah += 30;
+    // Sangat gelap -> awan tebal
+    scoreMendung += 30;
   }
   else if (ldrADC > 1500 && ldrADC <= 3000) {
     // Terang sedang -> cerah berawan
     scoreCerahBerawan += 20;
   }
   else {
-    // Gelap -> awan tebal
-    scoreMendung += 30;
+    // terang -> langit cerah
+    scoreCerah += 30;
   }
      
   // 6) Modifikasi dengan rain drop sensor
