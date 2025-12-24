@@ -4,6 +4,7 @@
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BME280.h>
 #include <LiquidCrystal_I2C.h>
+#include <WiFi.h>
 
 // ==================== OBJEK LCD ====================
 LiquidCrystal_I2C lcd(0x27, 16, 2); // Alamat 0x27, 16 kolom x 2 baris
@@ -26,6 +27,16 @@ unsigned long lastTrendUpdate = 0;
 // ==================== OBJEK GLOBAL ====================
 Adafruit_BME280 bme;
 
+// ==================== KONFIG WIFI & THINGSPEAK ====================
+const char* WIFI_SSID     = "Yayasan peduli kasih";
+const char* WIFI_PASSWORD = "pakpututyangpalingbaik";
+
+const char* THINGSPEAK_API_KEY = "3JBCYPZQB22NHOG4";
+const char* THINGSPEAK_SERVER  = "api.thingspeak.com";
+
+const unsigned long THINGSPEAK_INTERVAL_MS = 20000UL; // >15s agar aman dari rate limit
+unsigned long lastThingSpeakSend = 0;
+
 // ==================== ENUM & STRUCT PREDIKSI ====================
 enum WeatherCode {
   CERAH = 0,
@@ -40,6 +51,65 @@ struct WeatherPrediction {
   int confidence;     // 0–100 %
   float deltaP;       // tren tekanan 3 jam (hPa)
 };
+
+// ==================== WIFI & THINGSPEAK HELPERS ====================
+void connectWiFi() {
+  if (WiFi.status() == WL_CONNECTED) {
+    return;
+  }
+
+  Serial.print("Menghubungkan WiFi: ");
+  Serial.println(WIFI_SSID);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 15000UL) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print("WiFi terhubung, IP: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("Gagal terhubung ke WiFi");
+  }
+}
+
+void ensureWiFiConnected() {
+  if (WiFi.status() != WL_CONNECTED) {
+    connectWiFi();
+  }
+}
+
+bool sendDataToThingSpeak(float tempC, float hum, float pressHpa) {
+  ensureWiFiConnected();
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("Kirim ThingSpeak gagal: WiFi tidak terhubung");
+    return false;
+  }
+
+  WiFiClient client;
+  if (!client.connect(THINGSPEAK_SERVER, 80)) {
+    Serial.println("Kirim ThingSpeak gagal: koneksi server");
+    return false;
+  }
+
+  String url = String("/update?api_key=") + THINGSPEAK_API_KEY +
+               "&field1=" + String(tempC, 2) +
+               "&field2=" + String(hum, 2) +
+               "&field3=" + String(pressHpa, 2);
+
+  client.print(String("GET ") + url + " HTTP/1.1\r\n" +
+               "Host: " + THINGSPEAK_SERVER + "\r\n" +
+               "Connection: close\r\n\r\n");
+
+  Serial.println("Kirim ThingSpeak: " + url);
+  delay(300); // beri waktu transmisi singkat
+  return true;
+}
 
 // ==================== FUNGSI TREND TEKANAN ====================
 // Simpan tekanan ke circular buffer setiap 10 menit
@@ -102,7 +172,7 @@ WeatherPrediction predictWeatherTropis(float pressure, float humidity, float tem
     scoreHujanDeras   += 40;
   }
 
-  // 2) Modifikasi dari kelembaban// 2) Modifikasi dengan tren tekanan (kalau sudah valid)
+  //2) Modifikasi dengan tren tekanan (kalau sudah valid)
   if (hasTrend) {
     if (deltaP > 2.0f) {
       // Tekanan naik -> cuaca membaik
@@ -226,7 +296,9 @@ void setup() {
   Serial.begin(115200);
   delay(100);
 
-  // I2C ESP32 (SDA = 21, SCL = 22)
+  connectWiFi();
+
+  // I2C ESP32 (SDA = 8, SCL = 9)
   Wire.begin(SDA_PIN, SCL_PIN);
 
   // Init LCD 16x2 I2C
@@ -279,6 +351,8 @@ void setup() {
 
 // ==================== LOOP ====================
 void loop() {
+
+  ensureWiFiConnected();
 
   // ===== BACA SENSOR =====
   float temp  = bme.readTemperature();          // °C
@@ -334,6 +408,13 @@ void loop() {
   Serial.print(pred.confidence);
   Serial.println("%)");
   Serial.println();
+
+  // ===== KIRIM KE THINGSPEAK (interval 20s) =====
+  if (now - lastThingSpeakSend >= THINGSPEAK_INTERVAL_MS) {
+    if (sendDataToThingSpeak(temp, hum, press)) {
+      lastThingSpeakSend = now;
+    }
+  }
 
   // ===== TAMPILKAN DI LCD =====
   lcd.clear();
