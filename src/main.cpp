@@ -5,13 +5,19 @@
 #include <Adafruit_BME280.h>
 #include <LiquidCrystal_I2C.h>
 #include <WiFi.h>
-#include <WiFiManager.h>
-#include <Preferences.h>
+#include <time.h>
 
 // ==================== OBJEK LCD ====================
 LiquidCrystal_I2C lcd(0x27, 16, 2); // Alamat 0x27, 16 kolom x 2 baris
 #define SCL_PIN 9
 #define SDA_PIN 8
+
+// ==================== CONFIG NTP & JAM AKTIF LDR ====================
+const char* NTP_SERVER = "pool.ntp.org";
+const long  GMT_OFFSET_SEC = 7 * 3600; // WIB
+const int   DST_OFFSET_SEC = 0;
+const int   LDR_START_HOUR = 6;
+const int   LDR_END_HOUR   = 18;
 
 // ==================== CONFIG TREND BAROMETER ====================
 const int   TREND_SLOTS        = 18;              // 3 jam @ setiap 10 menit
@@ -29,13 +35,11 @@ unsigned long lastTrendUpdate = 0;
 // ==================== OBJEK GLOBAL ====================
 Adafruit_BME280 bme;
 
-// ==================== KONFIG STORAGE & THINGSPEAK ====================
-Preferences prefs;                     // NVS untuk simpan konfigurasi
-String thingSpeakApiKey;               // API key yang bisa diubah lewat portal
+// ==================== KONFIG WIFI & THINGSPEAK ====================
+const char* WIFI_SSID     = "EVELIN";
+const char* WIFI_PASSWORD = "12345678";
 
-const char* PREF_NAMESPACE    = "weather";
-const char* PREF_API_KEY_NAME = "ts_api_key";
-
+const char* THINGSPEAK_API_KEY = "3JBCYPZQB22NHOG4";
 const char* THINGSPEAK_SERVER  = "api.thingspeak.com";
 
 const unsigned long THINGSPEAK_INTERVAL_MS = 20000UL; // >15s agar aman dari rate limit
@@ -56,53 +60,65 @@ struct WeatherPrediction {
   float deltaP;       // tren tekanan 3 jam (hPa)
 };
 
-// ==================== WIFI & THINGSPEAK HELPERS ====================
-void loadStoredConfig() {
-  prefs.begin(PREF_NAMESPACE, true);
-  thingSpeakApiKey = prefs.getString(PREF_API_KEY_NAME, "");
-  prefs.end();
-}
+// ==================== WAKTU & NTP ====================
+void initNTP() {
+  Serial.println("Init NTP...");
+  configTime(GMT_OFFSET_SEC, DST_OFFSET_SEC, NTP_SERVER);
 
-void saveStoredConfig(const String &apiKey) {
-  prefs.begin(PREF_NAMESPACE, false);
-  prefs.putString(PREF_API_KEY_NAME, apiKey);
-  prefs.end();
-}
-
-bool startConfigPortal(bool resetSettings) {
-  WiFiManager wm;
-  if (resetSettings) {
-    wm.resetSettings(); // lupa WiFi sebelumnya
+  struct tm timeinfo;
+  int attempt = 0;
+  while (!getLocalTime(&timeinfo) && attempt < 10) {
+    delay(500);
+    attempt++;
   }
 
-  // Field kustom untuk API key ThingSpeak
-  WiFiManagerParameter apiKeyParam("tskey", "ThingSpeak API Key", thingSpeakApiKey.c_str(), 32);
-  wm.addParameter(&apiKeyParam);
-
-  wm.setTimeout(180); // portal non-aktif setelah 3 menit jika tidak ada input
-  bool res = wm.autoConnect("ICAM-Setup"); // buka AP jika belum ada kredensial
-
-  if (res) {
-    thingSpeakApiKey = apiKeyParam.getValue();
-    saveStoredConfig(thingSpeakApiKey);
-    Serial.println("WiFi terhubung via WiFiManager");
-    Serial.print("IP: ");
-    Serial.println(WiFi.localIP());
-    Serial.print("API Key tersimpan: ");
-    Serial.println(thingSpeakApiKey);
+  if (getLocalTime(&timeinfo)) {
+    Serial.print("NTP OK, waktu: ");
+    Serial.println(&timeinfo, "%d/%m %H:%M:%S");
   } else {
-    Serial.println("Config portal ditutup tanpa koneksi");
+    Serial.println("NTP gagal, lanjut tanpa waktu");
   }
-
-  return res;
 }
 
-void ensureWiFiConnected() {
+bool isLDRActiveTime() {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) {
+    return false; // gagal baca waktu, matikan LDR agar aman
+  }
+  int h = timeinfo.tm_hour;
+  return (h >= LDR_START_HOUR && h < LDR_END_HOUR);
+}
+
+// ==================== WIFI & THINGSPEAK HELPERS ====================
+void connectWiFi() {
   if (WiFi.status() == WL_CONNECTED) {
     return;
   }
-  Serial.println("WiFi belum terhubung, membuka portal konfigurasi...");
-  startConfigPortal(false);
+
+  Serial.print("Menghubungkan WiFi: ");
+  Serial.println(WIFI_SSID);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 15000UL) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print("WiFi terhubung, IP: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("Gagal terhubung ke WiFi");
+  }
+}
+
+void ensureWiFiConnected() {
+  if (WiFi.status() != WL_CONNECTED) {
+    connectWiFi();
+  }
 }
 
 bool sendDataToThingSpeak(float tempC, float hum, float pressHpa) {
@@ -112,18 +128,13 @@ bool sendDataToThingSpeak(float tempC, float hum, float pressHpa) {
     return false;
   }
 
-  if (thingSpeakApiKey.isEmpty()) {
-    Serial.println("Kirim ThingSpeak gagal: API key belum diset (buka portal konfigurasi)");
-    return false;
-  }
-
   WiFiClient client;
   if (!client.connect(THINGSPEAK_SERVER, 80)) {
     Serial.println("Kirim ThingSpeak gagal: koneksi server");
     return false;
   }
 
-  String url = String("/update?api_key=") + thingSpeakApiKey +
+  String url = String("/update?api_key=") + THINGSPEAK_API_KEY +
                "&field1=" + String(tempC, 2) +
                "&field2=" + String(hum, 2) +
                "&field3=" + String(pressHpa, 2);
@@ -238,19 +249,19 @@ WeatherPrediction predictWeatherTropis(float pressure, float humidity, float tem
   scoreHujanRingan += 10;
   }
    
-  // 5) Modifikasi dengan intensitas cahaya (LDR)
-  // ADC ESP32: 0 (terang) - 4095 (gelap)
-  if (ldrADC > 3000) {
-    // Sangat gelap -> awan tebal
-    scoreMendung += 30;
-  }
-  else if (ldrADC > 1500 && ldrADC <= 3000) {
-    // Terang sedang -> cerah berawan
-    scoreCerahBerawan += 20;
-  }
-  else {
-    // terang -> langit cerah
-    scoreCerah += 30;
+  // 5) Modifikasi dengan intensitas cahaya (LDR) hanya saat jam aktif
+  bool ldrActive = isLDRActiveTime();
+  if (ldrActive) {
+    // ADC ESP32: 0 (terang) - 4095 (gelap)
+    if (ldrADC > 3000) {
+      scoreMendung += 30; // Sangat gelap -> awan tebal
+    }
+    else if (ldrADC > 1500 && ldrADC <= 3000) {
+      scoreCerahBerawan += 20; // Terang sedang -> cerah berawan
+    }
+    else {
+      scoreCerah += 30; // Terang -> langit cerah
+    }
   }
      
   // 6) Modifikasi dengan rain drop sensor
@@ -322,8 +333,8 @@ void setup() {
   Serial.begin(115200);
   delay(100);
 
-  loadStoredConfig();
-  startConfigPortal(false); // akan auto-konek jika kredensial sudah ada, atau buka AP jika belum
+  connectWiFi();
+  initNTP();
 
   // I2C ESP32 (SDA = 8, SCL = 9)
   Wire.begin(SDA_PIN, SCL_PIN);
