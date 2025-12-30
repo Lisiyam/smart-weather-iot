@@ -5,6 +5,8 @@
 #include <Adafruit_BME280.h>
 #include <LiquidCrystal_I2C.h>
 #include <WiFi.h>
+#include <WiFiManager.h>
+#include <Preferences.h>
 
 // ==================== OBJEK LCD ====================
 LiquidCrystal_I2C lcd(0x27, 16, 2); // Alamat 0x27, 16 kolom x 2 baris
@@ -27,11 +29,13 @@ unsigned long lastTrendUpdate = 0;
 // ==================== OBJEK GLOBAL ====================
 Adafruit_BME280 bme;
 
-// ==================== KONFIG WIFI & THINGSPEAK ====================
-const char* WIFI_SSID     = "Yayasan peduli kasih";
-const char* WIFI_PASSWORD = "pakpututyangpalingbaik";
+// ==================== KONFIG STORAGE & THINGSPEAK ====================
+Preferences prefs;                     // NVS untuk simpan konfigurasi
+String thingSpeakApiKey;               // API key yang bisa diubah lewat portal
 
-const char* THINGSPEAK_API_KEY = "3JBCYPZQB22NHOG4";
+const char* PREF_NAMESPACE    = "weather";
+const char* PREF_API_KEY_NAME = "ts_api_key";
+
 const char* THINGSPEAK_SERVER  = "api.thingspeak.com";
 
 const unsigned long THINGSPEAK_INTERVAL_MS = 20000UL; // >15s agar aman dari rate limit
@@ -53,35 +57,52 @@ struct WeatherPrediction {
 };
 
 // ==================== WIFI & THINGSPEAK HELPERS ====================
-void connectWiFi() {
-  if (WiFi.status() == WL_CONNECTED) {
-    return;
+void loadStoredConfig() {
+  prefs.begin(PREF_NAMESPACE, true);
+  thingSpeakApiKey = prefs.getString(PREF_API_KEY_NAME, "");
+  prefs.end();
+}
+
+void saveStoredConfig(const String &apiKey) {
+  prefs.begin(PREF_NAMESPACE, false);
+  prefs.putString(PREF_API_KEY_NAME, apiKey);
+  prefs.end();
+}
+
+bool startConfigPortal(bool resetSettings) {
+  WiFiManager wm;
+  if (resetSettings) {
+    wm.resetSettings(); // lupa WiFi sebelumnya
   }
 
-  Serial.print("Menghubungkan WiFi: ");
-  Serial.println(WIFI_SSID);
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  // Field kustom untuk API key ThingSpeak
+  WiFiManagerParameter apiKeyParam("tskey", "ThingSpeak API Key", thingSpeakApiKey.c_str(), 32);
+  wm.addParameter(&apiKeyParam);
 
-  unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 15000UL) {
-    delay(500);
-    Serial.print(".");
-  }
-  Serial.println();
+  wm.setTimeout(180); // portal non-aktif setelah 3 menit jika tidak ada input
+  bool res = wm.autoConnect("ICAM-Setup"); // buka AP jika belum ada kredensial
 
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.print("WiFi terhubung, IP: ");
+  if (res) {
+    thingSpeakApiKey = apiKeyParam.getValue();
+    saveStoredConfig(thingSpeakApiKey);
+    Serial.println("WiFi terhubung via WiFiManager");
+    Serial.print("IP: ");
     Serial.println(WiFi.localIP());
+    Serial.print("API Key tersimpan: ");
+    Serial.println(thingSpeakApiKey);
   } else {
-    Serial.println("Gagal terhubung ke WiFi");
+    Serial.println("Config portal ditutup tanpa koneksi");
   }
+
+  return res;
 }
 
 void ensureWiFiConnected() {
-  if (WiFi.status() != WL_CONNECTED) {
-    connectWiFi();
+  if (WiFi.status() == WL_CONNECTED) {
+    return;
   }
+  Serial.println("WiFi belum terhubung, membuka portal konfigurasi...");
+  startConfigPortal(false);
 }
 
 bool sendDataToThingSpeak(float tempC, float hum, float pressHpa) {
@@ -91,13 +112,18 @@ bool sendDataToThingSpeak(float tempC, float hum, float pressHpa) {
     return false;
   }
 
+  if (thingSpeakApiKey.isEmpty()) {
+    Serial.println("Kirim ThingSpeak gagal: API key belum diset (buka portal konfigurasi)");
+    return false;
+  }
+
   WiFiClient client;
   if (!client.connect(THINGSPEAK_SERVER, 80)) {
     Serial.println("Kirim ThingSpeak gagal: koneksi server");
     return false;
   }
 
-  String url = String("/update?api_key=") + THINGSPEAK_API_KEY +
+  String url = String("/update?api_key=") + thingSpeakApiKey +
                "&field1=" + String(tempC, 2) +
                "&field2=" + String(hum, 2) +
                "&field3=" + String(pressHpa, 2);
@@ -296,7 +322,8 @@ void setup() {
   Serial.begin(115200);
   delay(100);
 
-  connectWiFi();
+  loadStoredConfig();
+  startConfigPortal(false); // akan auto-konek jika kredensial sudah ada, atau buka AP jika belum
 
   // I2C ESP32 (SDA = 8, SCL = 9)
   Wire.begin(SDA_PIN, SCL_PIN);
