@@ -5,19 +5,21 @@
 #include <Adafruit_BME280.h>
 #include <LiquidCrystal_I2C.h>
 #include <WiFi.h>
-#include <time.h>
+#include <time.h>  // Library untuk NTP
 
 // ==================== OBJEK LCD ====================
 LiquidCrystal_I2C lcd(0x27, 16, 2); // Alamat 0x27, 16 kolom x 2 baris
 #define SCL_PIN 9
 #define SDA_PIN 8
 
-// ==================== CONFIG NTP & JAM AKTIF LDR ====================
+// ==================== CONFIG NTP ====================
 const char* NTP_SERVER = "pool.ntp.org";
-const long  GMT_OFFSET_SEC = 7 * 3600; // WIB
-const int   DST_OFFSET_SEC = 0;
-const int   LDR_START_HOUR = 6;
-const int   LDR_END_HOUR   = 18;
+const long  GMT_OFFSET_SEC = 7 * 3600;  // WIB = GMT+7
+const int   DAYLIGHT_OFFSET_SEC = 0;    // Indonesia tidak pakai DST
+
+// Batasan jam kerja LDR (06:00 - 18:00)
+const int LDR_START_HOUR = 6;   // Mulai jam 6 pagi
+const int LDR_END_HOUR = 18;    // Sampai jam 6 sore
 
 // ==================== CONFIG TREND BAROMETER ====================
 const int   TREND_SLOTS        = 18;              // 3 jam @ setiap 10 menit
@@ -60,33 +62,42 @@ struct WeatherPrediction {
   float deltaP;       // tren tekanan 3 jam (hPa)
 };
 
-// ==================== WAKTU & NTP ====================
+// ==================== FUNGSI NTP ====================
 void initNTP() {
-  Serial.println("Init NTP...");
-  configTime(GMT_OFFSET_SEC, DST_OFFSET_SEC, NTP_SERVER);
-
+  Serial.println("Menginisialisasi NTP...");
+  configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER);
+  
+  // Tunggu sampai waktu tersinkronisasi
   struct tm timeinfo;
-  int attempt = 0;
-  while (!getLocalTime(&timeinfo) && attempt < 10) {
-    delay(500);
-    attempt++;
+  int attempts = 0;
+  while (!getLocalTime(&timeinfo) && attempts < 10) {
+    Serial.print(".");
+    delay(1000);
+    attempts++;
   }
-
+  
   if (getLocalTime(&timeinfo)) {
-    Serial.print("NTP OK, waktu: ");
-    Serial.println(&timeinfo, "%d/%m %H:%M:%S");
+    Serial.println("\nNTP berhasil tersinkronisasi!");
+    Serial.print("Waktu sekarang: ");
+    Serial.println(&timeinfo, "%A, %d %B %Y %H:%M:%S");
   } else {
-    Serial.println("NTP gagal, lanjut tanpa waktu");
+    Serial.println("\nGagal mendapatkan waktu dari NTP");
   }
 }
 
+// Fungsi untuk mengecek apakah LDR boleh aktif (jam 06:00 - 18:00)
 bool isLDRActiveTime() {
   struct tm timeinfo;
   if (!getLocalTime(&timeinfo)) {
-    return false; // gagal baca waktu, matikan LDR agar aman
+    // Jika gagal mendapatkan waktu, anggap LDR tidak aktif (aman)
+    Serial.println("Gagal mendapatkan waktu lokal");
+    return false;
   }
-  int h = timeinfo.tm_hour;
-  return (h >= LDR_START_HOUR && h < LDR_END_HOUR);
+  
+  int currentHour = timeinfo.tm_hour;
+  
+  // LDR aktif jika jam >= 6 pagi DAN jam < 6 sore
+  return (currentHour >= LDR_START_HOUR && currentHour < LDR_END_HOUR);
 }
 
 // ==================== WIFI & THINGSPEAK HELPERS ====================
@@ -249,19 +260,28 @@ WeatherPrediction predictWeatherTropis(float pressure, float humidity, float tem
   scoreHujanRingan += 10;
   }
    
-  // 5) Modifikasi dengan intensitas cahaya (LDR) hanya saat jam aktif
+  // 5) Modifikasi dengan intensitas cahaya (LDR) - HANYA JIKA JAM AKTIF (06:00-18:00)
+  // ADC ESP32: 0 (terang) - 4095 (gelap)
   bool ldrActive = isLDRActiveTime();
+  
   if (ldrActive) {
-    // ADC ESP32: 0 (terang) - 4095 (gelap)
+    // LDR aktif pada jam siang (06:00 - 18:00)
     if (ldrADC > 3000) {
-      scoreMendung += 30; // Sangat gelap -> awan tebal
+      // Sangat gelap -> awan tebal
+      scoreMendung += 30;
     }
     else if (ldrADC > 1500 && ldrADC <= 3000) {
-      scoreCerahBerawan += 20; // Terang sedang -> cerah berawan
+      // Terang sedang -> cerah berawan
+      scoreCerahBerawan += 20;
     }
     else {
-      scoreCerah += 30; // Terang -> langit cerah
+      // terang -> langit cerah
+      scoreCerah += 30;
     }
+    Serial.println("LDR aktif - Score ditambahkan");
+  } else {
+    // LDR tidak aktif di luar jam kerja (18:00 - 06:00)
+    Serial.println("LDR non-aktif (di luar jam 06:00-18:00)");
   }
      
   // 6) Modifikasi dengan rain drop sensor
@@ -334,7 +354,11 @@ void setup() {
   delay(100);
 
   connectWiFi();
-  initNTP();
+
+  // Inisialisasi NTP setelah WiFi terhubung
+  if (WiFi.status() == WL_CONNECTED) {
+    initNTP();
+  }
 
   // I2C ESP32 (SDA = 8, SCL = 9)
   Wire.begin(SDA_PIN, SCL_PIN);
@@ -424,6 +448,13 @@ void loop() {
   String predText = weatherCodeToText(pred.code);
 
     // ===== DEBUG SERIAL =====
+  // Tampilkan waktu saat ini
+  struct tm timeinfo;
+  if (getLocalTime(&timeinfo)) {
+    Serial.print("Waktu  : ");
+    Serial.println(&timeinfo, "%H:%M:%S");
+  }
+  
   Serial.println("====== Weather Data ======");
   Serial.print("Temp   : "); Serial.print(temp, 1); Serial.println(" C");
   Serial.print("Hum    : "); Serial.print(hum, 1);  Serial.println(" %");
@@ -437,7 +468,11 @@ void loop() {
     Serial.println("dP3h   : data < 3 jam");
   }
 
-  Serial.print("LDR ADC  : "); Serial.println(ldrADC);
+  Serial.print("LDR ADC  : "); Serial.print(ldrADC);
+  Serial.print(" (Status: ");
+  Serial.print(isLDRActiveTime() ? "Aktif" : "Non-aktif");
+  Serial.println(")");
+  
   Serial.print("Rain ADC : "); Serial.println(rainADC);
 
   Serial.print("Prediksi : ");
