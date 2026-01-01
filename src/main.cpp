@@ -6,11 +6,21 @@
 #include <LiquidCrystal_I2C.h>
 #include <WiFi.h>
 #include <time.h>  // Library untuk NTP
+#include <DFRobotDFPlayerMini.h>
 
 // ==================== OBJEK LCD ====================
 LiquidCrystal_I2C lcd(0x27, 16, 2); // Alamat 0x27, 16 kolom x 2 baris
 #define SCL_PIN 9
 #define SDA_PIN 8
+
+// ==================== DFPLAYER MINI ====================
+#define DFPLAYER_RX 16   // ESP32 RX ← DFPlayer TX
+#define DFPLAYER_TX 15   // ESP32 TX → DFPlayer RX
+HardwareSerial dfSerial(1);   // pakai UART1
+DFRobotDFPlayerMini dfplayer;
+bool dfReady = false;
+const unsigned long AUDIO_INTERVAL_MS = 7200000UL; // 2 jam
+unsigned long lastAudioPlay = 0;
 
 // ==================== CONFIG NTP ====================
 const char* NTP_SERVER = "pool.ntp.org";
@@ -61,6 +71,10 @@ struct WeatherPrediction {
   int confidence;     // 0–100 %
   float deltaP;       // tren tekanan 3 jam (hPa)
 };
+
+// Simpan prediksi yang terakhir sudah tampil di LCD
+WeatherPrediction lastDisplayedPred = {CERAH, 0, 0.0f};
+bool hasDisplayedPred = false;
 
 // ==================== FUNGSI NTP ====================
 void initNTP() {
@@ -157,6 +171,52 @@ bool sendDataToThingSpeak(float tempC, float hum, float pressHpa) {
   Serial.println("Kirim ThingSpeak: " + url);
   delay(300); // beri waktu transmisi singkat
   return true;
+}
+
+// ==================== DFPLAYER HELPERS ====================
+bool initDFPlayer() {
+  dfSerial.begin(9600, SERIAL_8N1, DFPLAYER_RX, DFPLAYER_TX);
+
+  Serial.println("Inisialisasi DFPlayer...");
+  if (!dfplayer.begin(dfSerial)) {
+    Serial.println("DFPlayer tidak terdeteksi. Cek wiring/SD card.");
+    return false;
+  }
+
+  dfplayer.volume(20); // 0–30
+  dfplayer.EQ(DFPLAYER_EQ_NORMAL);
+  dfplayer.outputDevice(DFPLAYER_DEVICE_SD);
+  dfReady = true;
+  lastAudioPlay = millis(); // start hitung interval 2 jam dari saat init
+  Serial.println("DFPlayer siap memutar audio cuaca.");
+  return true;
+}
+
+int weatherToTrack(WeatherCode code) {
+  switch (code) {
+    case CERAH:          return 1; // 0001
+    case CERAH_BERAWAN:  return 2; // 0002
+    case MENDUNG:        return 3; // 0003
+    case HUJAN_RINGAN:   return 4; // 0004
+    case HUJAN_DERAS:    return 5; // 0005 (pastikan file ada)
+    default:             return 0;
+  }
+}
+
+void playWeatherAudio(WeatherCode code) {
+  if (!dfReady) {
+    return;
+  }
+
+  int track = weatherToTrack(code);
+  if (track <= 0) {
+    return;
+  }
+
+  dfplayer.play(track);
+  Serial.print("Memutar audio cuaca track ");
+  Serial.println(track);
+  lastAudioPlay = millis();
 }
 
 // ==================== FUNGSI TREND TEKANAN ====================
@@ -353,6 +413,9 @@ void setup() {
   Serial.begin(115200);
   delay(100);
 
+  // Inisialisasi DFPlayer terlebih dulu agar siap ketika prediksi tersedia
+  initDFPlayer();
+
   connectWiFi();
 
   // Inisialisasi NTP setelah WiFi terhubung
@@ -489,15 +552,36 @@ void loop() {
     }
   }
 
-  // ===== TAMPILKAN DI LCD =====
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("Cuaca:");
-  lcd.setCursor(0, 1);
-  lcd.print(predText);
-  lcd.print(" ");
-  lcd.print(pred.confidence);
-  lcd.print("%");
+  // ===== TAMPILKAN DI LCD (hanya jika ada perubahan prediksi) =====
+  bool changed = (!hasDisplayedPred) ||
+                 (pred.code != lastDisplayedPred.code) ||
+                 (pred.confidence != lastDisplayedPred.confidence);
+
+  bool isRainNow = (pred.code == HUJAN_RINGAN || pred.code == HUJAN_DERAS);
+
+  // Notifikasi audio langsung jika status berubah ke hujan
+  if (changed && isRainNow) {
+    playWeatherAudio(pred.code);
+  }
+
+  // Notifikasi berkala tiap 2 jam
+  if (dfReady && (now - lastAudioPlay >= AUDIO_INTERVAL_MS)) {
+    playWeatherAudio(pred.code);
+  }
+
+  if (changed) {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Cuaca:");
+    lcd.setCursor(0, 1);
+    lcd.print(predText);
+    lcd.print(" ");
+    lcd.print(pred.confidence);
+    lcd.print("%");
+
+    lastDisplayedPred = pred;
+    hasDisplayedPred = true;
+  }
 
   // ===== TUNGGU SEJENAK =====
   delay(2000); // tampilkan selama 2 detik sebelum pembacaan berikutnya
