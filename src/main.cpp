@@ -48,8 +48,8 @@ unsigned long lastTrendUpdate = 0;
 Adafruit_BME280 bme;
 
 // ==================== KONFIG WIFI & THINGSPEAK ====================
-const char* WIFI_SSID     = "EVELIN";
-const char* WIFI_PASSWORD = "12345678";
+const char* WIFI_SSID     = "Yayasan peduli kasih";
+const char* WIFI_PASSWORD = "pakpututyangpalingbaik";
 
 const char* THINGSPEAK_API_KEY = "3JBCYPZQB22NHOG4";
 const char* THINGSPEAK_SERVER  = "api.thingspeak.com";
