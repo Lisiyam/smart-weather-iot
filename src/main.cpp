@@ -48,14 +48,16 @@ unsigned long lastTrendUpdate = 0;
 Adafruit_BME280 bme;
 
 // ==================== KONFIG WIFI & THINGSPEAK ====================
-const char* WIFI_SSID     = "Yayasan peduli kasih";
-const char* WIFI_PASSWORD = "pakpututyangpalingbaik";
+const char* WIFI_SSID     = "EVELIN";
+const char* WIFI_PASSWORD = "12345678";
 
 const char* THINGSPEAK_API_KEY = "3JBCYPZQB22NHOG4";
 const char* THINGSPEAK_SERVER  = "api.thingspeak.com";
 
 const unsigned long THINGSPEAK_INTERVAL_MS = 20000UL; // >15s agar aman dari rate limit
 unsigned long lastThingSpeakSend = 0;
+const unsigned long LOOP_INTERVAL_MS = 5000UL; // jeda antar siklus utama (pengganti delay blocking)
+const bool DEBUG_SCORE_OUTPUT = true;
 
 // ==================== ENUM & STRUCT PREDIKSI ====================
 enum WeatherCode {
@@ -183,7 +185,7 @@ bool initDFPlayer() {
     return false;
   }
 
-  dfplayer.volume(20); // 0–30
+  dfplayer.volume(30); // 0–30
   dfplayer.EQ(DFPLAYER_EQ_NORMAL);
   dfplayer.outputDevice(DFPLAYER_DEVICE_SD);
   dfReady = true;
@@ -213,7 +215,7 @@ void playWeatherAudio(WeatherCode code) {
     return;
   }
 
-  dfplayer.play(track);
+  dfplayer.playMp3Folder(track);
   Serial.print("Memutar audio cuaca track ");
   Serial.println(track);
   lastAudioPlay = millis();
@@ -252,32 +254,32 @@ WeatherPrediction predictWeatherTropis(float pressure, float humidity, float tem
 
   // 1) Base dari tekanan udara
   if (pressure > 1015.0f) {
-    scoreCerah        += 40;
-    scoreCerahBerawan += 20;
-    scoreMendung      += 0;
-    scoreHujanRingan  += 0;
-    scoreHujanDeras   += 0;
-  }
-  else if (pressure > 1010.0f && pressure <= 1015.0f) {
-    scoreCerah        += 20;
+    scoreCerah        += 60;
     scoreCerahBerawan += 30;
     scoreMendung      += 10;
     scoreHujanRingan  += 0;
     scoreHujanDeras   += 0;
   }
+  else if (pressure > 1010.0f && pressure <= 1015.0f) {
+    scoreCerah        += 30;
+    scoreCerahBerawan += 40;
+    scoreMendung      += 20;
+    scoreHujanRingan  += 10;
+    scoreHujanDeras   += 5;
+  }
   else if (pressure > 1005.0f && pressure <= 1010.0f) {
-    scoreCerah        += 0;
-    scoreCerahBerawan += 10;
+    scoreCerah        += 10;
+    scoreCerahBerawan += 25;
     scoreMendung      += 30;
-    scoreHujanRingan  += 15;
-    scoreHujanDeras   += 0;
+    scoreHujanRingan  += 20;
+    scoreHujanDeras   += 10;
   }
   else { // pressure <= 1005
     scoreCerah        += 0;
     scoreCerahBerawan += 0;
     scoreMendung      += 15;
     scoreHujanRingan  += 30;
-    scoreHujanDeras   += 40;
+    scoreHujanDeras   += 60;
   }
 
   //2) Modifikasi dengan tren tekanan (kalau sudah valid)
@@ -355,6 +357,15 @@ WeatherPrediction predictWeatherTropis(float pressure, float humidity, float tem
     scoreHujanRingan += 50;
   }
   // >=3000 dianggap kering -> tidak menambah skor
+
+  if (DEBUG_SCORE_OUTPUT) {
+    Serial.println("Skor kategori:");
+    Serial.print("  Cerah         : "); Serial.println(scoreCerah);
+    Serial.print("  Cerah Berawan : "); Serial.println(scoreCerahBerawan);
+    Serial.print("  Mendung       : "); Serial.println(scoreMendung);
+    Serial.print("  Hujan Ringan  : "); Serial.println(scoreHujanRingan);
+    Serial.print("  Hujan Deras   : "); Serial.println(scoreHujanDeras);
+  }
 
   // 7) Tentukan kategori berdasarkan skor tertinggi
   float scores[5] = {
@@ -477,6 +488,13 @@ void setup() {
 // ==================== LOOP ====================
 void loop() {
 
+  static unsigned long lastLoopRun = 0;
+  unsigned long now = millis();
+  if (now - lastLoopRun < LOOP_INTERVAL_MS) {
+    return; // belum waktunya jalan, jangan block loop utama
+  }
+  lastLoopRun = now;
+
   ensureWiFiConnected();
 
   // ===== BACA SENSOR =====
@@ -488,7 +506,6 @@ void loop() {
   int rainADC = analogRead(RAIN_PIN);            // 0–4095
 
     // ===== UPDATE TREND TEKANAN TIAP 10 MENIT =====
-  unsigned long now = millis();
   if (now - lastTrendUpdate >= TREND_INTERVAL_MS) {
     updatePressureHistory(press);
     lastTrendUpdate = now;
@@ -570,6 +587,7 @@ void loop() {
   }
 
   if (changed) {
+    delay(50); // jeda singkat sebelum update LCD
     lcd.clear();
     lcd.setCursor(0, 0);
     lcd.print("Cuaca:");
@@ -582,7 +600,4 @@ void loop() {
     lastDisplayedPred = pred;
     hasDisplayedPred = true;
   }
-
-  // ===== TUNGGU SEJENAK =====
-  delay(2000); // tampilkan selama 2 detik sebelum pembacaan berikutnya
 }
