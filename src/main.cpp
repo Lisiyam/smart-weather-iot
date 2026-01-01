@@ -148,7 +148,7 @@ void ensureWiFiConnected() {
   }
 }
 
-bool sendDataToThingSpeak(float tempC, float hum, float pressHpa) {
+bool sendDataToThingSpeak(float tempC, float hum, float pressHpa, int ldrADC, int rainADC, const String &predText, int confidence) {
   ensureWiFiConnected();
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("Kirim ThingSpeak gagal: WiFi tidak terhubung");
@@ -161,10 +161,17 @@ bool sendDataToThingSpeak(float tempC, float hum, float pressHpa) {
     return false;
   }
 
+  String predEnc = predText;
+  predEnc.replace(" ", "%20"); // encode spasi sederhana
+
   String url = String("/update?api_key=") + THINGSPEAK_API_KEY +
                "&field1=" + String(tempC, 2) +
                "&field2=" + String(hum, 2) +
-               "&field3=" + String(pressHpa, 2);
+               "&field3=" + String(pressHpa, 2) +
+               "&field4=" + String(ldrADC) +
+               "&field5=" + String(rainADC) +
+               "&field6=" + predEnc +
+               "&field7=" + String(confidence);
 
   client.print(String("GET ") + url + " HTTP/1.1\r\n" +
                "Host: " + THINGSPEAK_SERVER + "\r\n" +
@@ -564,7 +571,7 @@ void loop() {
 
   // ===== KIRIM KE THINGSPEAK (interval 20s) =====
   if (now - lastThingSpeakSend >= THINGSPEAK_INTERVAL_MS) {
-    if (sendDataToThingSpeak(temp, hum, press)) {
+    if (sendDataToThingSpeak(temp, hum, press, ldrADC, rainADC, predText, pred.confidence)) {
       lastThingSpeakSend = now;
     }
   }
