@@ -7,6 +7,8 @@
 #include <WiFi.h>
 #include <time.h>  // Library untuk NTP
 #include <DFRobotDFPlayerMini.h>
+#include <WiFiManager.h>   // Captive portal konfigurasi WiFi/API key
+#include <Preferences.h>   // Simpan kredensial di NVS
 
 // ==================== OBJEK LCD ====================
 LiquidCrystal_I2C lcd(0x27, 16, 2); // Alamat 0x27, 16 kolom x 2 baris
@@ -47,17 +49,36 @@ unsigned long lastTrendUpdate = 0;
 // ==================== OBJEK GLOBAL ====================
 Adafruit_BME280 bme;
 
-// ==================== KONFIG WIFI & THINGSPEAK ====================
-const char* WIFI_SSID     = "EVELIN";
-const char* WIFI_PASSWORD = "12345678";
-
-const char* THINGSPEAK_API_KEY = "3JBCYPZQB22NHOG4";
+// ==================== KONFIG WIFI & THINGSPEAK (DINAMIS) ====================
 const char* THINGSPEAK_SERVER  = "api.thingspeak.com";
-
 const unsigned long THINGSPEAK_INTERVAL_MS = 20000UL; // >15s agar aman dari rate limit
 unsigned long lastThingSpeakSend = 0;
 const unsigned long LOOP_INTERVAL_MS = 5000UL; // jeda antar siklus utama (pengganti delay blocking)
 const bool DEBUG_SCORE_OUTPUT = true;
+
+// Storage kredensial
+Preferences prefs;
+const char* PREF_NS          = "icam";
+const char* KEY_WIFI_SSID    = "wifi_ssid";
+const char* KEY_WIFI_PASS    = "wifi_pass";
+const char* KEY_TS_API       = "ts_api";
+
+String wifiSsid;
+String wifiPass;
+String tsApiKey;
+
+// WiFiManager
+const char* AP_PORTAL_NAME = "ICAM-Setup"; // SSID AP portal konfigurasi
+const uint16_t PORTAL_TIMEOUT_SEC = 180;     // waktu portal aktif
+bool requestPortal = false;                  // dipicu oleh perintah serial
+
+// Helper forward declarations
+void loadCredentials();
+void saveCredentials();
+bool startConfigPortal();
+void handleSerialCommands();
+void connectWiFi();
+void ensureWiFiConnected();
 
 // ==================== ENUM & STRUCT PREDIKSI ====================
 enum WeatherCode {
@@ -117,15 +138,100 @@ bool isLDRActiveTime() {
 }
 
 // ==================== WIFI & THINGSPEAK HELPERS ====================
+bool sendDataToThingSpeak(float tempC, float hum, float pressHpa, int ldrADC, int rainADC, const String &predText, int confidence);
+
+// ==================== DFPLAYER HELPERS ====================
+bool initDFPlayer() {
+  dfSerial.begin(9600, SERIAL_8N1, DFPLAYER_RX, DFPLAYER_TX);
+
+  Serial.println("Inisialisasi DFPlayer...");
+  if (!dfplayer.begin(dfSerial)) {
+    Serial.println("DFPlayer tidak terdeteksi. Cek wiring/SD card.");
+    return false;
+  }
+
+  dfplayer.volume(30); // 0–30
+  dfplayer.EQ(DFPLAYER_EQ_NORMAL);
+  dfplayer.outputDevice(DFPLAYER_DEVICE_SD);
+  dfReady = true;
+  lastAudioPlay = millis(); // start hitung interval 2 jam dari saat init
+  Serial.println("DFPlayer siap memutar audio cuaca.");
+  return true;
+}
+
+// ==================== KREDENSIAL & WIFI MANAGER ====================
+void loadCredentials() {
+  wifiSsid = prefs.getString(KEY_WIFI_SSID, "");
+  wifiPass = prefs.getString(KEY_WIFI_PASS, "");
+  tsApiKey = prefs.getString(KEY_TS_API, "");
+}
+
+void saveCredentials() {
+  prefs.putString(KEY_WIFI_SSID, wifiSsid);
+  prefs.putString(KEY_WIFI_PASS, wifiPass);
+  prefs.putString(KEY_TS_API, tsApiKey);
+}
+
+bool hasWiFiCred() {
+  return wifiSsid.length() > 0; // password boleh kosong (open AP)
+}
+
+bool startConfigPortal() {
+  Serial.println("Masuk mode konfigurasi (WiFiManager)");
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("AP: WiFi-Setup");
+  lcd.setCursor(0, 1);
+  lcd.print("Buka 192.168.4.1");
+
+  WiFi.mode(WIFI_STA);
+  WiFiManager wm;
+  WiFiManagerParameter apiParam("api", "ThingSpeak API Key", tsApiKey.c_str(), 32);
+  wm.addParameter(&apiParam);
+  wm.setTimeout(PORTAL_TIMEOUT_SEC); // portal auto-tutup jika timeout
+
+  bool ok = wm.autoConnect(AP_PORTAL_NAME);
+  if (!ok) {
+    Serial.println("Portal konfigurasi gagal/timeout");
+    return false;
+  }
+
+  wifiSsid = wm.getWiFiSSID();
+  wifiPass = wm.getWiFiPass();
+  tsApiKey = String(apiParam.getValue());
+  saveCredentials();
+
+  Serial.println("Kredensial tersimpan dari portal");
+  Serial.print("SSID: "); Serial.println(wifiSsid);
+  Serial.print("API : "); Serial.println(tsApiKey);
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Config OK");
+  lcd.setCursor(0, 1);
+  lcd.print("Reconnecting...");
+  return true;
+}
+
 void connectWiFi() {
+  if (!hasWiFiCred()) {
+    if (!startConfigPortal()) {
+      Serial.println("Tidak ada kredensial, portal gagal.");
+    }
+  }
+
+  if (!hasWiFiCred()) {
+    return; // tetap lanjut tanpa WiFi
+  }
+
   if (WiFi.status() == WL_CONNECTED) {
     return;
   }
 
   Serial.print("Menghubungkan WiFi: ");
-  Serial.println(WIFI_SSID);
+  Serial.println(wifiSsid);
   WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  WiFi.begin(wifiSsid.c_str(), wifiPass.c_str());
 
   unsigned long start = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - start < 15000UL) {
@@ -148,10 +254,59 @@ void ensureWiFiConnected() {
   }
 }
 
+void handleSerialCommands() {
+  static String buf;
+  while (Serial.available()) {
+    char c = (char)Serial.read();
+    if (c == '\n' || c == '\r') {
+      if (buf.length() == 0) {
+        continue;
+      }
+      String raw = buf;
+      buf = "";
+      raw.trim();
+      String cmd = raw;
+      cmd.toUpperCase();
+
+      if (cmd == "WIPECRED") {
+        Serial.println("Menghapus kredensial dan reboot...");
+        prefs.clear();
+        delay(200);
+        ESP.restart();
+      } else if (cmd == "PORTAL") {
+        Serial.println("Memicu portal konfigurasi...");
+        requestPortal = true;
+      } else if (cmd.startsWith("SETAPI")) {
+        int idx = raw.indexOf('=');
+        if (idx > 0 && idx < cmd.length() - 1) {
+          tsApiKey = raw.substring(idx + 1);
+          tsApiKey.trim();
+          saveCredentials();
+          Serial.print("API key diperbarui: ");
+          Serial.println(tsApiKey);
+        } else {
+          Serial.println("Format: SETAPI=YOURKEY");
+        }
+      } else {
+        Serial.println("Perintah tidak dikenal. Gunakan: WIPECRED, PORTAL, SETAPI=...");
+      }
+    } else {
+      if (buf.length() < 80) {
+        buf += c;
+      }
+    }
+  }
+}
+
 bool sendDataToThingSpeak(float tempC, float hum, float pressHpa, int ldrADC, int rainADC, const String &predText, int confidence) {
   ensureWiFiConnected();
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("Kirim ThingSpeak gagal: WiFi tidak terhubung");
+    return false;
+  }
+
+  if (tsApiKey.length() == 0) {
+    Serial.println("Kirim ThingSpeak dibatalkan: API key kosong");
     return false;
   }
 
@@ -164,7 +319,7 @@ bool sendDataToThingSpeak(float tempC, float hum, float pressHpa, int ldrADC, in
   String predEnc = predText;
   predEnc.replace(" ", "%20"); // encode spasi sederhana
 
-  String url = String("/update?api_key=") + THINGSPEAK_API_KEY +
+  String url = String("/update?api_key=") + tsApiKey +
                "&field1=" + String(tempC, 2) +
                "&field2=" + String(hum, 2) +
                "&field3=" + String(pressHpa, 2) +
@@ -179,25 +334,6 @@ bool sendDataToThingSpeak(float tempC, float hum, float pressHpa, int ldrADC, in
 
   Serial.println("Kirim ThingSpeak: " + url);
   delay(300); // beri waktu transmisi singkat
-  return true;
-}
-
-// ==================== DFPLAYER HELPERS ====================
-bool initDFPlayer() {
-  dfSerial.begin(9600, SERIAL_8N1, DFPLAYER_RX, DFPLAYER_TX);
-
-  Serial.println("Inisialisasi DFPlayer...");
-  if (!dfplayer.begin(dfSerial)) {
-    Serial.println("DFPlayer tidak terdeteksi. Cek wiring/SD card.");
-    return false;
-  }
-
-  dfplayer.volume(30); // 0–30
-  dfplayer.EQ(DFPLAYER_EQ_NORMAL);
-  dfplayer.outputDevice(DFPLAYER_DEVICE_SD);
-  dfReady = true;
-  lastAudioPlay = millis(); // start hitung interval 2 jam dari saat init
-  Serial.println("DFPlayer siap memutar audio cuaca.");
   return true;
 }
 
@@ -431,15 +567,10 @@ void setup() {
   Serial.begin(115200);
   delay(100);
 
-  // Inisialisasi DFPlayer terlebih dulu agar siap ketika prediksi tersedia
-  initDFPlayer();
+  prefs.begin(PREF_NS, false);
+  loadCredentials();
 
-  connectWiFi();
-
-  // Inisialisasi NTP setelah WiFi terhubung
-  if (WiFi.status() == WL_CONNECTED) {
-    initNTP();
-  }
+  Serial.println("Perintah serial: PORTAL, WIPECRED, SETAPI=YOURKEY");
 
   // I2C ESP32 (SDA = 8, SCL = 9)
   Wire.begin(SDA_PIN, SCL_PIN);
@@ -453,6 +584,16 @@ void setup() {
   lcd.print("Weather System");
   lcd.setCursor(0, 1);
   lcd.print("Initializing");
+
+  // Inisialisasi DFPlayer terlebih dulu agar siap ketika prediksi tersedia
+  initDFPlayer();
+
+  connectWiFi();
+
+  // Inisialisasi NTP setelah WiFi terhubung
+  if (WiFi.status() == WL_CONNECTED) {
+    initNTP();
+  }
 
   // Init BME280 (alamat umum: 0x76 / 0x77)
   if (!bme.begin(0x76)) {
@@ -494,6 +635,19 @@ void setup() {
 
 // ==================== LOOP ====================
 void loop() {
+
+  handleSerialCommands();
+
+  if (requestPortal) {
+    requestPortal = false;
+    bool ok = startConfigPortal();
+    if (ok) {
+      connectWiFi();
+      if (WiFi.status() == WL_CONNECTED) {
+        initNTP();
+      }
+    }
+  }
 
   static unsigned long lastLoopRun = 0;
   unsigned long now = millis();
