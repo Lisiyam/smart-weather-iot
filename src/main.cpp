@@ -397,7 +397,7 @@ WeatherPrediction predictWeatherTropis(float pressure, float humidity, float tem
 
   // 1) Base dari tekanan udara
   if (pressure > 1015.0f) {
-    scoreCerah        += 60;
+    scoreCerah        += 55;
     scoreCerahBerawan += 30;
     scoreMendung      += 10;
     scoreHujanRingan  += 0;
