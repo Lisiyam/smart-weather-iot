@@ -71,6 +71,7 @@ String tsApiKey;
 const char* AP_PORTAL_NAME = "ICAM-Setup"; // SSID AP portal konfigurasi
 const uint16_t PORTAL_TIMEOUT_SEC = 180;     // waktu portal aktif
 bool requestPortal = false;                  // dipicu oleh perintah serial
+bool portalAttempted = false;                // hindari loop portal berulang
 
 // Helper forward declarations
 void loadCredentials();
@@ -180,7 +181,7 @@ bool startConfigPortal() {
   Serial.println("Masuk mode konfigurasi (WiFiManager)");
   lcd.clear();
   lcd.setCursor(0, 0);
-  lcd.print("AP: WiFi-Setup");
+  lcd.print("AP: ICAM-Setup");
   lcd.setCursor(0, 1);
   lcd.print("Buka 192.168.4.1");
 
@@ -214,7 +215,8 @@ bool startConfigPortal() {
 }
 
 void connectWiFi() {
-  if (!hasWiFiCred()) {
+  if (!hasWiFiCred() && !portalAttempted) {
+    portalAttempted = true;
     if (!startConfigPortal()) {
       Serial.println("Tidak ada kredensial, portal gagal.");
     }
@@ -244,7 +246,14 @@ void connectWiFi() {
     Serial.print("WiFi terhubung, IP: ");
     Serial.println(WiFi.localIP());
   } else {
-    Serial.println("Gagal terhubung ke WiFi");
+    Serial.println("Gagal terhubung ke WiFi, buka portal...");
+    if (!portalAttempted) {
+      portalAttempted = true;
+      if (startConfigPortal()) {
+        // coba hubungkan ulang dengan kredensial baru
+        connectWiFi();
+      }
+    }
   }
 }
 
