@@ -397,32 +397,32 @@ WeatherPrediction predictWeatherTropis(float pressure, float humidity, float tem
 
   // 1) Base dari tekanan udara
   if (pressure > 1015.0f) {
-    scoreCerah        += 55;
+    scoreCerah        += 40;
+    scoreCerahBerawan += 20;
+    scoreMendung      += 0;
+    scoreHujanRingan  += 0;
+    scoreHujanDeras   += 0;
+  }
+  else if (pressure > 1010.0f && pressure <= 1015.0f) {
+    scoreCerah        += 20;
     scoreCerahBerawan += 30;
     scoreMendung      += 10;
     scoreHujanRingan  += 0;
     scoreHujanDeras   += 0;
   }
-  else if (pressure > 1010.0f && pressure <= 1015.0f) {
-    scoreCerah        += 30;
-    scoreCerahBerawan += 40;
-    scoreMendung      += 20;
-    scoreHujanRingan  += 10;
-    scoreHujanDeras   += 5;
-  }
   else if (pressure > 1005.0f && pressure <= 1010.0f) {
-    scoreCerah        += 10;
-    scoreCerahBerawan += 25;
+    scoreCerah        += 0;
+    scoreCerahBerawan += 10;
     scoreMendung      += 30;
-    scoreHujanRingan  += 20;
-    scoreHujanDeras   += 10;
+    scoreHujanRingan  += 15;
+    scoreHujanDeras   += 0;
   }
   else { // pressure <= 1005
     scoreCerah        += 0;
     scoreCerahBerawan += 0;
     scoreMendung      += 15;
     scoreHujanRingan  += 30;
-    scoreHujanDeras   += 60;
+    scoreHujanDeras   += 40;
   }
 
   //2) Modifikasi dengan tren tekanan (kalau sudah valid)
